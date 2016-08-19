@@ -23,7 +23,7 @@ import pandas as pd
 from six import iteritems
 from six.moves import range, map
 
-from zipline.testing import subtest, parameter_space
+from zipline.testing import parameter_space
 import zipline.utils.events
 from zipline.utils.calendars import get_calendar
 from zipline.utils.events import (
@@ -182,10 +182,10 @@ class TestEventRule(TestCase):
             super(Always, Always()).should_trigger('a')
 
 
-def minutes_for_days(ordered_days=False):
+def minutes_for_days(cal, ordered_days=False):
     """
     500 randomly selected days.
-    This is used to make sure our test coverage is unbaised towards any rules.
+    This is used to make sure our test coverage is unbiased towards any rules.
     We use a random sample because testing on all the trading days took
     around 180 seconds on my laptop, which is far too much for normal unit
     testing.
@@ -198,7 +198,6 @@ def minutes_for_days(ordered_days=False):
     Iterating over this yields a single day, iterating over the day yields
     the minutes for that day.
     """
-    cal = get_calendar('NYSE')
     random.seed('deterministic')
     if ordered_days:
         # Get a list of 500 trading days, in order. As a performance
@@ -216,11 +215,13 @@ def minutes_for_days(ordered_days=False):
         def session_picker(day):
             return random.choice(cal.all_sessions[:-1])
 
-    return ((cal.minutes_for_session(session_picker(cnt)),)
-            for cnt in range(500))
+    return [cal.minutes_for_session(session_picker(cnt))
+            for cnt in range(500)]
 
 
-class RuleTestCase(TestCase):
+class RuleTestCase(object):
+    CALENDAR_STRING = "foo"
+
     @classmethod
     def setUpClass(cls):
         # On the AfterOpen and BeforeClose tests, we want ensure that the
@@ -234,7 +235,7 @@ class RuleTestCase(TestCase):
         cls.after_open = AfterOpen(hours=1, minutes=5)
         cls.class_ = None  # Mark that this is the base class.
 
-        cal = get_calendar('NYSE')
+        cal = get_calendar(cls.CALENDAR_STRING)
         cls.before_close.cal = cal
         cls.after_open.cal = cal
 
@@ -266,129 +267,173 @@ class RuleTestCase(TestCase):
         )
 
 
-class TestStatelessRules(RuleTestCase):
+class StatelessRulesTests(RuleTestCase):
     @classmethod
     def setUpClass(cls):
-        super(TestStatelessRules, cls).setUpClass()
+        super(StatelessRulesTests, cls).setUpClass()
 
         cls.class_ = StatelessRule
-
-        cls.nyse_cal = get_calendar('NYSE')
+        cls.cal = get_calendar(cls.CALENDAR_STRING)
 
         # First day of 09/2014 is closed whereas that for 10/2014 is open
-        cls.sept_sessions = cls.nyse_cal.sessions_in_range(
+        cls.sept_sessions = cls.cal.sessions_in_range(
             pd.Timestamp('2014-09-01', tz='UTC'),
             pd.Timestamp('2014-09-30', tz='UTC'),
         )
-        cls.oct_sessions = cls.nyse_cal.sessions_in_range(
+        cls.oct_sessions = cls.cal.sessions_in_range(
             pd.Timestamp('2014-10-01', tz='UTC'),
             pd.Timestamp('2014-10-31', tz='UTC'),
         )
 
-        cls.sept_week = cls.nyse_cal.minutes_for_sessions_in_range(
+        cls.sept_week = cls.cal.minutes_for_sessions_in_range(
             pd.Timestamp("2014-09-22", tz='UTC'),
             pd.Timestamp("2014-09-26", tz='UTC')
         )
 
-    @subtest(minutes_for_days(), 'ms')
-    def test_Always(self, ms):
+        cls.HALF_SESSION = None
+        cls.FULL_SESSION = None
+
+    def test_Always(self):
         should_trigger = Always().should_trigger
-        self.assertTrue(all(map(should_trigger, ms)))
+        for session_minutes in minutes_for_days(self.cal):
+            self.assertTrue(all(map(should_trigger, session_minutes)))
 
-    @subtest(minutes_for_days(), 'ms')
-    def test_Never(self, ms):
+    def test_Never(self):
         should_trigger = Never().should_trigger
-        self.assertFalse(any(map(should_trigger, ms)))
+        for session_minutes in minutes_for_days(self.cal):
+            self.assertFalse(any(map(should_trigger, session_minutes)))
 
-    @subtest(minutes_for_days(ordered_days=True), 'ms')
-    def test_AfterOpen(self, ms):
+    def test_AfterOpen(self):
+        minute_groups = minutes_for_days(self.cal, ordered_days=True)
         should_trigger = self.after_open.should_trigger
-        for i, m in enumerate(ms):
-            # Should only trigger at the 64th minute
-            if i != 64:
-                self.assertFalse(should_trigger(m))
-            else:
-                self.assertTrue(should_trigger(m))
+        for session_minutes in minute_groups:
+            for i, minute in enumerate(session_minutes):
+                # Should only trigger at the 64th minute
+                if i != 64:
+                    self.assertFalse(should_trigger(minute))
+                else:
+                    self.assertTrue(should_trigger(minute))
 
-    @subtest(minutes_for_days(ordered_days=True), 'ms')
-    def test_BeforeClose(self, ms):
-        ms = list(ms)
+    def test_BeforeClose(self):
+        minute_groups = minutes_for_days(self.cal, ordered_days=True)
         should_trigger = self.before_close.should_trigger
-        for m in ms:
-            # Should only trigger at the 65th-to-last minute
-            if m != ms[-66]:
-                self.assertFalse(should_trigger(m))
-            else:
-                self.assertTrue(should_trigger(m))
+        for minute_group in minute_groups:
+            for minute in minute_group:
+                # Should only trigger at the 65th-to-last minute
+                if minute != minute_group[-66]:
+                    self.assertFalse(should_trigger(minute))
+                else:
+                    self.assertTrue(should_trigger(minute))
 
     def test_NotHalfDay(self):
         rule = NotHalfDay()
-        rule.cal = self.nyse_cal
+        rule.cal = self.cal
 
-        half_day_period = pd.Timestamp("2014-07-03", tz='UTC')
-        full_day_period = pd.Timestamp("2014-09-24", tz='UTC')
+        if self.HALF_SESSION:
+            for minute in self.cal.minutes_for_session(self.HALF_SESSION):
+                self.assertFalse(rule.should_trigger(minute))
 
-        for minute in self.nyse_cal.minutes_for_session(half_day_period):
-            self.assertFalse(rule.should_trigger(minute))
-
-        for minute in self.nyse_cal.minutes_for_session(full_day_period):
-            self.assertTrue(rule.should_trigger(minute))
+        if self.FULL_SESSION:
+            for minute in self.cal.minutes_for_session(self.FULL_SESSION):
+                self.assertTrue(rule.should_trigger(minute))
 
     def test_NthTradingDayOfWeek_day_zero(self):
         """
         Test that we don't blow up when trying to call week_start's
         should_trigger on the first day of a trading environment.
         """
-        cal = get_calendar('NYSE')
         rule = NthTradingDayOfWeek(0)
-        rule.cal = cal
-        first_open = self.nyse_cal.open_and_close_for_session(
-            self.nyse_cal.all_sessions[0]
+        rule.cal = self.cal
+        first_open = self.cal.open_and_close_for_session(
+            self.cal.all_sessions[0]
         )
         self.assertTrue(first_open)
 
-    @subtest(param_range(MAX_WEEK_RANGE), 'n')
-    def test_NthTradingDayOfWeek(self, n):
-        cal = get_calendar('NYSE')
-        rule = NthTradingDayOfWeek(n)
-        rule.cal = cal
-        should_trigger = rule.should_trigger
-        prev_period = self.nyse_cal.minute_to_session_label(self.sept_week[0])
-        n_tdays = 0
-        for minute in self.sept_week:
-            period = self.nyse_cal.minute_to_session_label(
-                minute, direction="none"
-            )
+    def test_NthTradingDayOfWeek(self):
+        for n in range(MAX_WEEK_RANGE):
+            rule = NthTradingDayOfWeek(n)
+            rule.cal = self.cal
+            should_trigger = rule.should_trigger
+            prev_period = self.cal.minute_to_session_label(self.sept_week[0])
+            n_tdays = 0
+            for minute in self.sept_week:
+                period = self.cal.minute_to_session_label(minute)
 
-            if prev_period < period:
-                n_tdays += 1
-                prev_period = period
-
-            if should_trigger(minute):
-                self.assertEqual(n_tdays, n)
-            else:
-                self.assertNotEqual(n_tdays, n)
-
-    @subtest(param_range(MAX_WEEK_RANGE), 'n')
-    def test_NDaysBeforeLastTradingDayOfWeek(self, n):
-        cal = get_calendar('NYSE')
-        rule = NDaysBeforeLastTradingDayOfWeek(n)
-        rule.cal = cal
-        should_trigger = rule.should_trigger
-        for minute in self.sept_week:
-            if should_trigger(minute):
-                n_tdays = 0
-                session = self.nyse_cal.minute_to_session_label(
-                    minute,
-                    direction="none"
-                )
-                next_session = self.nyse_cal.next_session_label(session)
-                while next_session.dayofweek > session.dayofweek:
-                    session = next_session
-                    next_session = self.nyse_cal.next_session_label(session)
+                if prev_period < period:
                     n_tdays += 1
+                    prev_period = period
 
-                self.assertEqual(n_tdays, n)
+                if should_trigger(minute):
+                    self.assertEqual(n_tdays, n)
+                else:
+                    self.assertNotEqual(n_tdays, n)
+
+    def test_NDaysBeforeLastTradingDayOfWeek(self):
+        for n in range(MAX_WEEK_RANGE):
+            rule = NDaysBeforeLastTradingDayOfWeek(n)
+            rule.cal = self.cal
+            should_trigger = rule.should_trigger
+            for minute in self.sept_week:
+                if should_trigger(minute):
+                    n_tdays = 0
+                    session = self.cal.minute_to_session_label(
+                        minute,
+                        direction="none"
+                    )
+                    next_session = self.cal.next_session_label(session)
+                    while next_session.dayofweek > session.dayofweek:
+                        session = next_session
+                        next_session = self.cal.next_session_label(session)
+                        n_tdays += 1
+
+                    self.assertEqual(n_tdays, n)
+
+    def test_NthTradingDayOfMonth(self):
+        for n in range(MAX_MONTH_RANGE):
+            rule = NthTradingDayOfMonth(n)
+            rule.cal = self.cal
+            should_trigger = rule.should_trigger
+            for sessions_list in (self.sept_sessions, self.oct_sessions):
+                for n_tdays, session in enumerate(sessions_list):
+                    # just check the first 10 minutes of each session
+                    for m in self.cal.minutes_for_session(session)[0:10]:
+                        if should_trigger(m):
+                            self.assertEqual(n_tdays, n)
+                        else:
+                            self.assertNotEqual(n_tdays, n)
+
+    def test_NDaysBeforeLastTradingDayOfMonth(self):
+        for n in range(MAX_MONTH_RANGE):
+            rule = NDaysBeforeLastTradingDayOfMonth(n)
+            rule.cal = self.cal
+            should_trigger = rule.should_trigger
+            sessions = reversed(self.oct_sessions)
+            for n_days_before, session in enumerate(sessions):
+                for m in self.cal.minutes_for_session(session)[0:10]:
+                    if should_trigger(m):
+                        self.assertEqual(n_days_before, n)
+                    else:
+                        self.assertNotEqual(n_days_before, n)
+
+    def test_ComposedRule(self):
+        minute_groups = minutes_for_days(self.cal)
+        rule1 = Always()
+        rule2 = Never()
+
+        for minute in minute_groups:
+            composed = rule1 & rule2
+            should_trigger = composed.should_trigger
+            self.assertIsInstance(composed, ComposedRule)
+            self.assertIs(composed.first, rule1)
+            self.assertIs(composed.second, rule2)
+            self.assertFalse(any(map(should_trigger, minute)))
+
+
+class TestStatelessRulesNYSE(StatelessRulesTests, TestCase):
+    CALENDAR_STRING = "NYSE"
+
+    HALF_SESSION = pd.Timestamp("2014-07-03", tz='UTC')
+    FULL_SESSION = pd.Timestamp("2014-09-24", tz='UTC')
 
     @parameter_space(
         rule_offset=(0, 1, 2, 3, 4),
@@ -412,7 +457,7 @@ class TestStatelessRules(RuleTestCase):
 
         delta = timedelta(days=start_offset)
 
-        jan_minutes = self.nyse_cal.minutes_for_sessions_in_range(
+        jan_minutes = self.cal.minutes_for_sessions_in_range(
             pd.Timestamp("2014-01-06", tz='UTC') + delta,
             pd.Timestamp("2014-01-31", tz='UTC')
         )
@@ -442,7 +487,7 @@ class TestStatelessRules(RuleTestCase):
             trigger_periods = \
                 [x - timedelta(days=rule_offset) for x in trigger_periods]
 
-        rule.cal = self.nyse_cal
+        rule.cal = self.cal
         should_trigger = rule(rule_offset).should_trigger
 
         # If offset is 4, there is not enough trading days in the short week,
@@ -454,9 +499,9 @@ class TestStatelessRules(RuleTestCase):
         trigger_periods = [x for x in trigger_periods if x >= sim_start]
 
         # Get all the minutes on the trigger dates
-        trigger_minutes = self.nyse_cal.minutes_for_session(trigger_periods[0])
+        trigger_minutes = self.cal.minutes_for_session(trigger_periods[0])
         for period in trigger_periods[1:]:
-            trigger_minutes += self.nyse_cal.minutes_for_session(period)
+            trigger_minutes += self.cal.minutes_for_session(period)
 
         expected_n_triggered = len(trigger_minutes)
         trigger_minutes_iter = iter(trigger_minutes)
@@ -475,14 +520,14 @@ class TestStatelessRules(RuleTestCase):
             NDaysBeforeLastTradingDayOfWeek(4)
         time_rule = AfterOpen(minutes=60)
 
-        week_rule.cal = self.nyse_cal
-        time_rule.cal = self.nyse_cal
+        week_rule.cal = self.cal
+        time_rule.cal = self.cal
 
         composed_rule = week_rule & time_rule
 
         should_trigger = composed_rule.should_trigger
 
-        week_minutes = self.nyse_cal.minutes_for_sessions_in_range(
+        week_minutes = self.cal.minutes_for_sessions_in_range(
             pd.Timestamp("2014-01-06", tz='UTC'),
             pd.Timestamp("2014-01-10", tz='UTC')
         )
@@ -500,55 +545,25 @@ class TestStatelessRules(RuleTestCase):
 
         self.assertEqual(n_triggered, 1)
 
-    @subtest(param_range(MAX_MONTH_RANGE), 'n')
-    def test_NthTradingDayOfMonth(self, n):
-        cal = get_calendar('NYSE')
-        rule = NthTradingDayOfMonth(n)
-        rule.cal = cal
-        should_trigger = rule.should_trigger
-        for sessions_list in (self.sept_sessions, self.oct_sessions):
-            for n_tdays, session in enumerate(sessions_list):
-                for m in self.nyse_cal.minutes_for_session(session):
-                    if should_trigger(m):
-                        self.assertEqual(n_tdays, n)
-                    else:
-                        self.assertNotEqual(n_tdays, n)
 
-    @subtest(param_range(MAX_MONTH_RANGE), 'n')
-    def test_NDaysBeforeLastTradingDayOfMonth(self, n):
-        cal = get_calendar('NYSE')
-        rule = NDaysBeforeLastTradingDayOfMonth(n)
-        rule.cal = cal
-        should_trigger = rule.should_trigger
-        for n_days_before, session in enumerate(reversed(self.oct_sessions)):
-            for m in self.nyse_cal.minutes_for_session(session):
-                if should_trigger(m):
-                    self.assertEqual(n_days_before, n)
-                else:
-                    self.assertNotEqual(n_days_before, n)
+class TestStatelessRulesCME(StatelessRulesTests, TestCase):
+    CALENDAR_STRING = "CME"
 
-    @subtest(minutes_for_days(), 'ms')
-    def test_ComposedRule(self, ms):
-        rule1 = Always()
-        rule2 = Never()
-
-        composed = rule1 & rule2
-        should_trigger = composed.should_trigger
-        self.assertIsInstance(composed, ComposedRule)
-        self.assertIs(composed.first, rule1)
-        self.assertIs(composed.second, rule2)
-        self.assertFalse(any(map(should_trigger, ms)))
+    HALF_SESSION = pd.Timestamp("2014-07-04", tz='UTC')
+    FULL_SESSION = pd.Timestamp("2014-09-24", tz='UTC')
 
 
-class TestStatefulRules(RuleTestCase):
+class StatefulRulesTests(RuleTestCase):
+    CALENDAR_STRING = "NYSE"
+
     @classmethod
     def setUpClass(cls):
-        super(TestStatefulRules, cls).setUpClass()
+        super(StatefulRulesTests, cls).setUpClass()
 
         cls.class_ = StatefulRule
+        cls.cal = get_calendar(cls.CALENDAR_STRING)
 
-    @subtest(minutes_for_days(), 'ms')
-    def test_OncePerDay(self, ms):
+    def test_OncePerDay(self):
         class RuleCounter(StatefulRule):
             """
             A rule that counts the number of times another rule triggers
@@ -562,8 +577,18 @@ class TestStatefulRules(RuleTestCase):
                     self.count += 1
                 return st
 
-        rule = RuleCounter(OncePerDay())
-        for m in ms:
-            rule.should_trigger(m)
+        for minute_group in minutes_for_days(self.cal):
+            rule = RuleCounter(OncePerDay())
 
-        self.assertEqual(rule.count, 1)
+            for minute in minute_group:
+                rule.should_trigger(minute)
+
+            self.assertEqual(rule.count, 1)
+
+
+class TestStatefulRulesNYSE(StatefulRulesTests, TestCase):
+    CALENDAR_STRING = "NYSE"
+
+
+class TestStatefulRulesCME(StatefulRulesTests, TestCase):
+    CALENDAR_STRING = "CME"

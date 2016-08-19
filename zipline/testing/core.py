@@ -961,6 +961,29 @@ def subtest(iterator, *_names):
     return dec
 
 
+@nottest
+def subtestwithcal(iterator, *_names):
+    def dec(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            import pdb; pdb.set_trace()
+            names = _names
+            failures = []
+            for scope in iterator:
+                scope = tuple(scope)
+                try:
+                    f(*args + scope, **kwargs)
+                except Exception as e:
+                    if not names:
+                        names = count()
+                    failures.append((dict(zip(names, scope)), e))
+            if failures:
+                raise SubTestFailures(*failures)
+
+        return wrapped
+    return dec
+
+
 class MockDailyBarReader(object):
     def spot_price(self, col, sid, dt):
         return 100
